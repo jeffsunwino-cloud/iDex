@@ -1,0 +1,92 @@
+name: Build unsigned iDex IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Optional bundle ID; leave empty to use com.github.<owner>.idex
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Xcode 27.1 device build
+    runs-on: xcode-27
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 27.1
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Choose a personal bundle ID
+        env:
+          REQUESTED_BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_BUNDLE_ID" ]]; then
+            bundle_id="$REQUESTED_BUNDLE_ID"
+          else
+            safe_owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+            [[ -n "$safe_owner" ]] || safe_owner="user"
+            bundle_id="com.github.${safe_owner}.idex"
+          fi
+
+          if [[ ! "$bundle_id" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+            echo "Invalid bundle ID: $bundle_id" >&2
+            exit 1
+          fi
+
+          echo "IDEX_BUNDLE_ID=$bundle_id" >> "$GITHUB_ENV"
+          echo "Building with bundle ID: $bundle_id"
+
+      - name: Build the unsigned device app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project iDex.xcodeproj \
+            -scheme iDex \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/iDexDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM= \
+            PRODUCT_BUNDLE_IDENTIFIER="$IDEX_BUNDLE_ID" \
+            clean build | tee "$GITHUB_WORKSPACE/xcodebuild.log"
+
+      - name: Package the IPA
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/iDexDerivedData/Build/Products/Release-iphoneos/iDex.app"
+          staging="$RUNNER_TEMP/iDexPackage"
+          test -d "$app"
+          mkdir -p "$staging/Payload"
+          ditto "$app" "$staging/Payload/iDex.app"
+          (
+            cd "$staging"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/iDex-unsigned.ipa" Payload
+          )
+          shasum -a 256 "$GITHUB_WORKSPACE/iDex-unsigned.ipa" > "$GITHUB_WORKSPACE/iDex-unsigned.ipa.sha256"
+          file "$app/iDex"
+          ls -lh "$GITHUB_WORKSPACE/iDex-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iDex-unsigned-ipa
+          path: |
+            iDex-unsigned.ipa
+            iDex-unsigned.ipa.sha256
+            xcodebuild.log
+          if-no-files-found: error
+          retention-days: 14
